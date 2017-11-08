@@ -1020,18 +1020,6 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 	}
 
-	{
-		// Add the kubernetes service nodeports rule - note moved here from kubeNodePortsChain as
-		// a performance improvement for iptables-restore
-		args := []string{"-m", "comment", "--comment", "kubernetes service nodeports; NOTE: this must be the last rule in this chain",
-			"-m", "addrtype", "--dst-type", "LOCAL",
-			"-j", string(kubeNodePortsChain)}
-		if _, err := proxier.iptables.EnsureRule(utiliptables.Append, utiliptables.TableNAT, utiliptables.ChainPrerouting, args...); err != nil {
-			glog.Errorf("Failed to ensure the kubernetes service nodeports rule %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPrerouting, kubeNodePortsChain, err)
-			return
-		}
-	}
-
 	// Create and link the kube postrouting chain.
 	{
 		if _, err := proxier.iptables.EnsureChain(utiliptables.TableNAT, kubePostroutingChain); err != nil {
@@ -1611,6 +1599,18 @@ func (proxier *Proxier) syncProxyRules() {
 		glog.V(2).Infof("Closing local ports after iptables-restore failure")
 		utilproxy.RevertPorts(replacementPortsMap, proxier.portsMap)
 		return
+	}
+	{
+		// Add the kubernetes service nodeports rule - note moved here from kubeNodePortsChain as
+		// a performance improvement for iptables-restore
+		// Needs to go after iptables-restore as KUBE-NODEPORTS has to exist
+		args := []string{"-m", "comment", "--comment", "kubernetes service nodeports; NOTE: this must be the last rule in this chain",
+			"-m", "addrtype", "--dst-type", "LOCAL",
+			"-j", string(kubeNodePortsChain)}
+		if _, err := proxier.iptables.EnsureRule(utiliptables.Append, utiliptables.TableNAT, utiliptables.ChainPrerouting, args...); err != nil {
+			glog.Errorf("Failed to ensure the kubernetes service nodeports rule %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPrerouting, kubeNodePortsChain, err)
+			return
+		}
 	}
 
 	// Close old local ports and save new ones.
