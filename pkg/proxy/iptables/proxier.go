@@ -531,6 +531,15 @@ func CleanupLeftovers(ipt utiliptables.Interface) (encounteredError bool) {
 		}
 	}
 
+	// Delete the kubernetes service nodeports rule
+	args = []string{"-m", "comment", "--comment", "kubernetes service nodeports; NOTE: this must be the last rule in this chain",
+		"-m", "addrtype", "--dst-type", "LOCAL",
+		"-j", string(kubeNodePortsChain)}
+	if err := ipt.DeleteRule(utiliptables.TableNAT, utiliptables.ChainPrerouting, args...); err != nil {
+		glog.Errorf("Failed to Delete the kubernetes service nodeports rule %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPrerouting, kubeNodePortsChain, err)
+		return
+	}
+
 	// Unlink the postrouting chain.
 	args = []string{
 		"-m", "comment", "--comment", "kubernetes postrouting rules",
@@ -955,7 +964,7 @@ func (proxier *Proxier) syncProxyRules() {
 	start := time.Now()
 	defer func() {
 		SyncProxyRulesLatency.Observe(sinceInMicroseconds(start))
-		glog.V(4).Infof("syncProxyRules took %v", time.Since(start))
+		glog.V(2).Infof("syncProxyRules took %v", time.Since(start))
 	}()
 	// don't sync rules till we've received services and endpoints
 	if !proxier.endpointsSynced || !proxier.servicesSynced {
@@ -980,7 +989,7 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 	}
 
-	glog.V(3).Infof("Syncing iptables rules")
+	glog.V(2).Infof("Syncing iptables rules")
 
 	// Create and link the kube services chain.
 	{
@@ -1008,6 +1017,18 @@ func (proxier *Proxier) syncProxyRules() {
 				glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", tc.table, tc.chain, kubeServicesChain, err)
 				return
 			}
+		}
+	}
+
+	{
+		// Add the kubernetes service nodeports rule - note moved here from kubeNodePortsChain as
+		// a performance improvement for iptables-restore
+		args := []string{"-m", "comment", "--comment", "kubernetes service nodeports; NOTE: this must be the last rule in this chain",
+			"-m", "addrtype", "--dst-type", "LOCAL",
+			"-j", string(kubeNodePortsChain)}
+		if _, err := proxier.iptables.EnsureRule(utiliptables.Append, utiliptables.TableNAT, utiliptables.ChainPrerouting, args...); err != nil {
+			glog.Errorf("Failed to ensure the kubernetes service nodeports rule %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPrerouting, kubeNodePortsChain, err)
+			return
 		}
 	}
 
@@ -1547,13 +1568,14 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 	}
 
+	// This has been moed to PREROUTING chain as a performance improvement
 	// Finally, tail-call to the nodeports chain.  This needs to be after all
 	// other service portal rules.
-	writeLine(proxier.natRules,
-		"-A", string(kubeServicesChain),
-		"-m", "comment", "--comment", `"kubernetes service nodeports; NOTE: this must be the last rule in this chain"`,
-		"-m", "addrtype", "--dst-type", "LOCAL",
-		"-j", string(kubeNodePortsChain))
+	//writeLine(proxier.natRules,
+	//	"-A", string(utiliptables.ChainPrerouting),
+	//	"-m", "comment", "--comment", `"kubernetes service nodeports; NOTE: this must be the last rule in this chain"`,
+	//	"-m", "addrtype", "--dst-type", "LOCAL",
+	//	"-j", string(kubeNodePortsChain))
 
 	// Write the end-of-table markers.
 	writeLine(proxier.filterRules, "COMMIT")
