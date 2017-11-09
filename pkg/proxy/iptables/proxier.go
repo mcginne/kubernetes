@@ -1560,7 +1560,7 @@ func (proxier *Proxier) syncProxyRules() {
 	// Finally, tail-call to the nodeports chain.  This needs to be after all
 	// other service portal rules.
 	//writeLine(proxier.natRules,
-	//	"-A", string(utiliptables.ChainPrerouting),
+	//	"-A", string(kubeServicesChain),
 	//	"-m", "comment", "--comment", `"kubernetes service nodeports; NOTE: this must be the last rule in this chain"`,
 	//	"-m", "addrtype", "--dst-type", "LOCAL",
 	//	"-j", string(kubeNodePortsChain))
