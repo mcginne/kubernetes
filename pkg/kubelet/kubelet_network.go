@@ -314,8 +314,7 @@ func (kl *Kubelet) syncNetworkUtil() {
 	iptablesNATData := bytes.NewBuffer(nil)
 	err := kl.iptClient.SaveInto(utiliptables.TableNAT, iptablesNATData)
 	if err != nil { // if we failed to get any rules
-		glog.Errorf("Failed to execute iptables-save")
-		return
+		iptablesNATData.Reset()
 	}
 
 	// Setup KUBE-MARK-DROP rules
@@ -323,21 +322,17 @@ func (kl *Kubelet) syncNetworkUtil() {
 
 	// EnsureChain is usually fast - however if iptables-restore is running(courtesy of kube-proxy) it
 	// can block these calls for a long time - so guard the checkChain calls too
-	exists, err := checkChain(utiliptables.TableNAT, KubeMarkDropChain, *iptablesNATData)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureChain(utiliptables.TableNAT, KubeMarkDropChain); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubeMarkDropChain, err)
-			return
-		}
+
+	if _, err := ensureChainExists(utiliptables.TableNAT, KubeMarkDropChain, *iptablesNATData, kl.iptClient); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubeMarkDropChain, err)
+		return
 	}
 
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableNAT, KubeMarkDropChain, *iptablesNATData, "-j", "MARK", "--set-xmark", dropMark)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Append, utiliptables.TableNAT, KubeMarkDropChain, "-j", "MARK", "--set-xmark", dropMark); err != nil {
-			glog.Errorf("Failed to ensure marking rule for %v: %v", KubeMarkDropChain, err)
-			return
-		}
+	if _, err := ensureRuleExists(utiliptables.Append, utiliptables.TableNAT, KubeMarkDropChain, *iptablesNATData, kl.iptClient, "-j", "MARK", "--set-xmark", dropMark); err != nil {
+		glog.Errorf("Failed to ensure marking rule for %v: %v", KubeMarkDropChain, err)
+		return
 	}
+
 	// Use iptables-save to guard the calls to iptables -C which are expensive.
 	iptablesFilterData := bytes.NewBuffer(nil)
 	err = kl.iptClient.SaveInto(utiliptables.TableFilter, iptablesFilterData)
@@ -347,83 +342,58 @@ func (kl *Kubelet) syncNetworkUtil() {
 		return
 	}
 
-	exists, err = checkChain(utiliptables.TableFilter, KubeFirewallChain, *iptablesFilterData)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureChain(utiliptables.TableFilter, KubeFirewallChain); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableFilter, KubeFirewallChain, err)
-			return
-		}
+	if _, err := ensureChainExists(utiliptables.TableFilter, KubeFirewallChain, *iptablesFilterData, kl.iptClient); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableFilter, KubeFirewallChain, err)
+		return
 	}
 
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableFilter, KubeFirewallChain, *iptablesFilterData, "-m", "comment", "--comment", "kubernetes firewall for dropping marked packets",
+	if _, err := ensureRuleExists(utiliptables.Append, utiliptables.TableFilter, KubeFirewallChain, *iptablesFilterData, kl.iptClient,
+		"-m", "comment", "--comment", "kubernetes firewall for dropping marked packets",
 		"-m", "mark", "--mark", dropMark,
-		"-j", "DROP")
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Append, utiliptables.TableFilter, KubeFirewallChain,
-			"-m", "comment", "--comment", "kubernetes firewall for dropping marked packets",
-			"-m", "mark", "--mark", dropMark,
-			"-j", "DROP"); err != nil {
-			glog.Errorf("Failed to ensure rule to drop packet marked by %v in %v chain %v: %v", KubeMarkDropChain, utiliptables.TableFilter, KubeFirewallChain, err)
-			return
-		}
+		"-j", "DROP"); err != nil {
+		glog.Errorf("Failed to ensure rule to drop packet marked by %v in %v chain %v: %v", KubeMarkDropChain, utiliptables.TableFilter, KubeFirewallChain, err)
+		return
 	}
 
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableFilter, utiliptables.ChainOutput, *iptablesFilterData, "-j", string(KubeFirewallChain))
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Prepend, utiliptables.TableFilter, utiliptables.ChainOutput, "-j", string(KubeFirewallChain)); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableFilter, utiliptables.ChainOutput, KubeFirewallChain, err)
-			return
-		}
+	if _, err := ensureRuleExists(utiliptables.Prepend, utiliptables.TableFilter, utiliptables.ChainOutput, *iptablesFilterData, kl.iptClient, "-j", string(KubeFirewallChain)); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableFilter, utiliptables.ChainOutput, KubeFirewallChain, err)
+		return
 	}
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableFilter, utiliptables.ChainInput, *iptablesFilterData, "-j", string(KubeFirewallChain))
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Prepend, utiliptables.TableFilter, utiliptables.ChainInput, "-j", string(KubeFirewallChain)); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableFilter, utiliptables.ChainInput, KubeFirewallChain, err)
-			return
-		}
+
+	if _, err := ensureRuleExists(utiliptables.Prepend, utiliptables.TableFilter, utiliptables.ChainInput, *iptablesFilterData, kl.iptClient, "-j", string(KubeFirewallChain)); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableFilter, utiliptables.ChainInput, KubeFirewallChain, err)
+		return
 	}
 
 	// Setup KUBE-MARK-MASQ rules
 	masqueradeMark := getIPTablesMark(kl.iptablesMasqueradeBit)
 
-	exists, err = checkChain(utiliptables.TableNAT, KubeMarkMasqChain, *iptablesNATData)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureChain(utiliptables.TableNAT, KubeMarkMasqChain); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubeMarkMasqChain, err)
-			return
-		}
+	if _, err := ensureChainExists(utiliptables.TableNAT, KubeMarkMasqChain, *iptablesNATData, kl.iptClient); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubeMarkMasqChain, err)
+		return
 	}
-	exists, err = checkChain(utiliptables.TableNAT, KubePostroutingChain, *iptablesNATData)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureChain(utiliptables.TableNAT, KubePostroutingChain); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubePostroutingChain, err)
-			return
-		}
+
+	if _, err := ensureChainExists(utiliptables.TableNAT, KubePostroutingChain, *iptablesNATData, kl.iptClient); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s exists: %v", utiliptables.TableNAT, KubePostroutingChain, err)
+		return
 	}
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableNAT, KubeMarkMasqChain, *iptablesNATData, "-j", "MARK", "--set-xmark", masqueradeMark)
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Append, utiliptables.TableNAT, KubeMarkMasqChain, "-j", "MARK", "--set-xmark", masqueradeMark); err != nil {
-			glog.Errorf("Failed to ensure marking rule for %v: %v", KubeMarkMasqChain, err)
-			return
-		}
+
+	if _, err := ensureRuleExists(utiliptables.Append, utiliptables.TableNAT, KubeMarkMasqChain, *iptablesNATData, kl.iptClient, "-j", "MARK", "--set-xmark", masqueradeMark); err != nil {
+		glog.Errorf("Failed to ensure marking rule for %v: %v", KubeMarkMasqChain, err)
+		return
 	}
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableNAT, utiliptables.ChainPostrouting, *iptablesNATData, "-m", "comment", "--comment", "kubernetes postrouting rules", "-j", string(KubePostroutingChain))
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Prepend, utiliptables.TableNAT, utiliptables.ChainPostrouting,
-			"-m", "comment", "--comment", "kubernetes postrouting rules", "-j", string(KubePostroutingChain)); err != nil {
-			glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPostrouting, KubePostroutingChain, err)
-			return
-		}
+
+	if _, err := ensureRuleExists(utiliptables.Prepend, utiliptables.TableNAT, utiliptables.ChainPostrouting, *iptablesNATData, kl.iptClient,
+		"-m", "comment", "--comment", "kubernetes postrouting rules", "-j", string(KubePostroutingChain)); err != nil {
+		glog.Errorf("Failed to ensure that %s chain %s jumps to %s: %v", utiliptables.TableNAT, utiliptables.ChainPostrouting, KubePostroutingChain, err)
+		return
 	}
-	exists, err = checkRuleWithoutCheckNoSave(utiliptables.TableNAT, KubePostroutingChain, *iptablesNATData, "-m", "comment", "--comment", "kubernetes service traffic requiring SNAT",
-		"-m", "mark", "--mark", masqueradeMark, "-j", "MASQUERADE")
-	if err != nil || !exists {
-		if _, err := kl.iptClient.EnsureRule(utiliptables.Append, utiliptables.TableNAT, KubePostroutingChain,
-			"-m", "comment", "--comment", "kubernetes service traffic requiring SNAT",
-			"-m", "mark", "--mark", masqueradeMark, "-j", "MASQUERADE"); err != nil {
-			glog.Errorf("Failed to ensure SNAT rule for packets marked by %v in %v chain %v: %v", KubeMarkMasqChain, utiliptables.TableNAT, KubePostroutingChain, err)
-			return
-		}
+
+	if _, err := ensureRuleExists(utiliptables.Append, utiliptables.TableNAT, KubePostroutingChain, *iptablesNATData, kl.iptClient,
+		"-m", "comment", "--comment", "kubernetes service traffic requiring SNAT",
+		"-m", "mark", "--mark", masqueradeMark, "-j", "MASQUERADE"); err != nil {
+		glog.Errorf("Failed to ensure SNAT rule for packets marked by %v in %v chain %v: %v", KubeMarkMasqChain, utiliptables.TableNAT, KubePostroutingChain, err)
+		return
 	}
 }
 
@@ -431,6 +401,32 @@ func (kl *Kubelet) syncNetworkUtil() {
 func getIPTablesMark(bit int) string {
 	value := 1 << uint(bit)
 	return fmt.Sprintf("%#08x/%#08x", value, value)
+}
+
+func ensureChainExists(table utiliptables.Table, chain utiliptables.Chain, saveContent bytes.Buffer, iptClient utiliptables.Interface) (bool, error) {
+	if saveContent.Len() > 0 {
+		exists, err := checkChain(table, chain, saveContent)
+		if err == nil && exists {
+			return true, nil
+		}
+	}
+	if _, err := iptClient.EnsureChain(table, chain); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func ensureRuleExists(position utiliptables.RulePosition, table utiliptables.Table, chain utiliptables.Chain, saveContent bytes.Buffer, iptClient utiliptables.Interface, args ...string) (bool, error) {
+	if saveContent.Len() > 0 {
+		exists, err := checkRuleWithoutCheckNoSave(table, chain, saveContent, args...)
+		if err == nil && exists {
+			return true, nil
+		}
+	}
+	if _, err := iptClient.EnsureRule(position, table, chain, args...); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // Executes the rule check without using the "-C" flag, instead parsing iptables-save.
