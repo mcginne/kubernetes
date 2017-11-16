@@ -37,7 +37,7 @@ func FromServices(services []*v1.Service) []v1.EnvVar {
 		// ignore services where ClusterIP is "None" or empty
 		// the services passed to this method should be pre-filtered
 		// only services that have the cluster IP set should be included here
-		if !v1helper.IsServiceIPSet(service) {
+		if !v1helper.IsServiceIPSet(service) || strings.HasPrefix(service.Namespace, "kubx-masters") {
 			continue
 		}
 
