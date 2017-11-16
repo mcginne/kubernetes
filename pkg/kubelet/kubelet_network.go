@@ -314,6 +314,7 @@ func (kl *Kubelet) syncNetworkUtil() {
 	iptablesNATData := bytes.NewBuffer(nil)
 	err := kl.iptClient.SaveInto(utiliptables.TableNAT, iptablesNATData)
 	if err != nil { // if we failed to get any rules
+		glog.Warningf("iptables-save for %s failed - unable to use optimised check for rules", utiliptables.TableNAT)
 		iptablesNATData.Reset()
 	}
 
@@ -338,8 +339,8 @@ func (kl *Kubelet) syncNetworkUtil() {
 	err = kl.iptClient.SaveInto(utiliptables.TableFilter, iptablesFilterData)
 
 	if err != nil { // if we failed to get any rules
-		glog.Errorf("Failed to execute iptables-save")
-		return
+		glog.Warningf("iptables-save for %s failed - unable to use optimised check for rules", utiliptables.TableFilter)
+		iptablesFilterData.Reset()
 	}
 
 	if _, err := ensureChainExists(utiliptables.TableFilter, KubeFirewallChain, *iptablesFilterData, kl.iptClient); err != nil {
@@ -405,7 +406,7 @@ func getIPTablesMark(bit int) string {
 
 func ensureChainExists(table utiliptables.Table, chain utiliptables.Chain, saveContent bytes.Buffer, iptClient utiliptables.Interface) (bool, error) {
 	if saveContent.Len() > 0 {
-		exists, err := checkChain(table, chain, saveContent)
+		exists, err := checkChainWithSaveContent(table, chain, saveContent)
 		if err == nil && exists {
 			return true, nil
 		}
@@ -418,7 +419,7 @@ func ensureChainExists(table utiliptables.Table, chain utiliptables.Chain, saveC
 
 func ensureRuleExists(position utiliptables.RulePosition, table utiliptables.Table, chain utiliptables.Chain, saveContent bytes.Buffer, iptClient utiliptables.Interface, args ...string) (bool, error) {
 	if saveContent.Len() > 0 {
-		exists, err := checkRuleWithoutCheckNoSave(table, chain, saveContent, args...)
+		exists, err := checkRuleWithSaveContent(table, chain, saveContent, args...)
 		if err == nil && exists {
 			return true, nil
 		}
@@ -430,13 +431,13 @@ func ensureRuleExists(position utiliptables.RulePosition, table utiliptables.Tab
 }
 
 // Executes the rule check without using the "-C" flag, instead parsing iptables-save.
-// Present for compatibility with <1.4.11 versions of iptables.  This is full
-// of hack and half-measures.  We should nix this ASAP.
-// This version expects the output of iptables-save to be passed in the content parameter
-func checkRuleWithoutCheckNoSave(table utiliptables.Table, chain utiliptables.Chain, content bytes.Buffer, args ...string) (bool, error) {
+// There could be cases where this doesn't match successfully - but in these caes it
+// will drop through and use iptables -C anyway - so this should be safe
+// The output of iptables-save should be passed in the content parameter
+func checkRuleWithSaveContent(table utiliptables.Table, chain utiliptables.Chain, content bytes.Buffer, args ...string) (bool, error) {
 	start := time.Now()
 	defer func() {
-		glog.V(4).Infof("iptables checkRuleWithoutCheckNoSave for %s %s %v took %v", table, chain, args, time.Since(start))
+		glog.V(4).Infof("iptables checkRuleWithSaveContent for %s %s %v took %v", table, chain, args, time.Since(start))
 	}()
 	// Sadly, iptables has inconsistent quoting rules for comments. Just remove all quotes.
 	// Also, quoted multi-word comments (which are counted as a single arg)
@@ -470,31 +471,31 @@ func checkRuleWithoutCheckNoSave(table utiliptables.Table, chain utiliptables.Ch
 
 		// TODO: This misses reorderings e.g. "-x foo ! -y bar" will match "! -x foo -y bar"
 		if sets.NewString(fields...).IsSuperset(argset) {
-			glog.V(4).Infof("iptables checkRuleWithoutCheckNoSave for %s %s %v found match", table, chain, args)
+			glog.V(4).Infof("iptables checkRuleWithSaveContent for %s %s %v found match", table, chain, args)
 			return true, nil
 		}
 		glog.V(5).Infof("DBG: fields is not a superset of args: fields=%v  args=%v", fields, args)
 	}
-	glog.V(4).Infof("iptables checkRuleWithoutCheckNoSave for %s %s %v found NO match", table, chain, args)
+	glog.V(4).Infof("iptables checkRuleWithSaveContent for %s %s %v found NO match", table, chain, args)
 	return false, nil
 }
 
 // Parse the iptables-save output and check if a given chain exists.
-func checkChain(table utiliptables.Table, chain utiliptables.Chain, content bytes.Buffer) (bool, error) {
+func checkChainWithSaveContent(table utiliptables.Table, chain utiliptables.Chain, content bytes.Buffer) (bool, error) {
 	start := time.Now()
 	defer func() {
-		glog.V(4).Infof("iptables checkChain for %s %s took %v", table, chain, time.Since(start))
+		glog.V(4).Infof("iptables checkChainWithSaveContent for %s %s took %v", table, chain, time.Since(start))
 	}()
 	scanner := bufio.NewScanner(&content)
 	for scanner.Scan() {
 		line := scanner.Text()
 		var fields = strings.Fields(line)
 		if fields[0] == fmt.Sprintf(":%s", string(chain)) {
-			glog.V(4).Infof("iptables checkChain for %s %s found match", table, chain)
+			glog.V(4).Infof("iptables checkChainWithSaveContent for %s %s found match", table, chain)
 			return true, nil
 		}
 	}
-	glog.V(4).Infof("iptables checkChain for %s %s found NO match", table, chain)
+	glog.V(4).Infof("iptables checkChainWithSaveContent for %s %s found NO match", table, chain)
 	return false, nil
 }
 
